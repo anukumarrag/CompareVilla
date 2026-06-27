@@ -20,8 +20,11 @@ def ensure_template_dir() -> None:
 
 
 def sanitize_template_name(template_name: str) -> str:
-    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", template_name.strip())
-    return safe_name.strip("_")
+    """Validate and normalize template filename input."""
+    safe_name = template_name.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", safe_name):
+        raise ValueError("Template name may only contain letters, numbers, '_' or '-'.")
+    return safe_name
 
 
 def detect_file_type(file_name: str) -> str:
@@ -34,6 +37,7 @@ def detect_file_type(file_name: str) -> str:
 
 
 def read_headers(uploaded_file: Any, file_type: str) -> list[str]:
+    """Read only header columns from an uploaded CSV/XLS/XLSX file."""
     uploaded_file.seek(0)
     if file_type == "CSV":
         columns = pd.read_csv(uploaded_file, nrows=0).columns.tolist()
@@ -44,6 +48,7 @@ def read_headers(uploaded_file: Any, file_type: str) -> list[str]:
 
 
 def read_dataframe(uploaded_file: Any, file_type: str) -> pd.DataFrame:
+    """Read a full dataframe from an uploaded file and reset stream position."""
     uploaded_file.seek(0)
     if file_type == "CSV":
         df = pd.read_csv(uploaded_file)
@@ -61,13 +66,14 @@ def template_files() -> list[Path]:
 def save_template(template_name: str, payload: dict[str, Any]) -> Path:
     ensure_template_dir()
     safe_name = sanitize_template_name(template_name)
-    if not safe_name:
-        raise ValueError("Template name must contain alphanumeric characters.")
 
     template_root = TEMPLATE_DIR.resolve()
-    output_path = (template_root / f"{safe_name}.json").resolve()
-    if output_path.parent != template_root:
+    file_name = f"{safe_name}.json"
+    if Path(file_name).name != file_name:
         raise ValueError("Invalid template name.")
+    output_path = (template_root / file_name).resolve()
+    if output_path.parent != template_root:
+        raise ValueError("Invalid template location.")
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     return output_path
@@ -84,6 +90,7 @@ def build_template_payload(
     primary_right: str,
     comparison_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    """Build template payload persisted as JSON for later comparisons."""
     return {
         "templateName": template_name,
         "primaryColumn": {
@@ -100,6 +107,7 @@ def compare_dataframes(
     right_df: pd.DataFrame,
     template_config: dict[str, Any],
 ) -> pd.DataFrame:
+    """Compare two dataframes based on configured key/column mappings."""
     primary = template_config["primaryColumn"]
     comparisons = template_config.get("columnsToCompare", [])
 
@@ -129,25 +137,29 @@ def compare_dataframes(
         label = f"{mapping['left_file']} ↔ {mapping['right_file']}"
 
         if left_col not in merged.columns or right_col not in merged.columns:
-            merged[f"{label} | mismatch"] = True
-            mismatch_any |= True
+            merged[f"{label} | mismatch"] = pd.Series(True, index=merged.index)
+            mismatch_any = pd.Series(True, index=merged.index)
             continue
 
         if mapping.get("type", "string") == "numeric":
-            threshold = float(mapping.get("threshold", 0) or 0)
+            threshold = float(mapping.get("threshold", 0))
             left_num = pd.to_numeric(merged[left_col], errors="coerce")
             right_num = pd.to_numeric(merged[right_col], errors="coerce")
 
             both_null = left_num.isna() & right_num.isna()
             both_present = left_num.notna() & right_num.notna()
             abs_diff = (left_num - right_num).abs()
+            # Numeric mismatch when both values exist and exceed threshold,
+            # or when one side is missing while the other has data.
             mismatch = (both_present & (abs_diff > threshold)) | (~both_present & ~both_null)
             merged[f"{label} | abs_diff"] = abs_diff
         else:
-            left_text = merged[left_col].astype("string")
-            right_text = merged[right_col].astype("string")
-            both_null = left_text.isna() & right_text.isna()
-            mismatch = ~(both_null | (left_text == right_text))
+            left_raw = merged[left_col]
+            right_raw = merged[right_col]
+            both_null = left_raw.isna() & right_raw.isna()
+            mismatch = (~both_null) & (
+                left_raw.fillna("").astype(str) != right_raw.fillna("").astype(str)
+            )
 
         mismatch = mismatch & (merged["_merge"] == "both")
         merged[f"{label} | mismatch"] = mismatch
@@ -161,12 +173,10 @@ def compare_dataframes(
     merged.loc[(merged["_merge"] == "both") & mismatch_any, "row_status"] = "Value mismatch"
     merged["has_discrepancy"] = merged["row_status"] != "Matched"
 
-    ordered_cols = [
-        "comparison_key",
-        "row_status",
-        "has_discrepancy",
-        "_merge",
-    ] + [col for col in merged.columns if col not in {"comparison_key", "row_status", "has_discrepancy", "_merge"}]
+    priority_cols = {"comparison_key", "row_status", "has_discrepancy", "_merge"}
+    ordered_cols = ["comparison_key", "row_status", "has_discrepancy", "_merge"] + [
+        col for col in merged.columns if col not in priority_cols
+    ]
 
     return merged[ordered_cols]
 
@@ -179,6 +189,7 @@ def export_dataframe_to_excel(df: pd.DataFrame) -> bytes:
 
 
 def style_discrepancy_rows(row: pd.Series) -> list[str]:
+    """Highlight rows that contain missing keys or field mismatches."""
     highlight = "background-color: #ffe6e6" if row.get("has_discrepancy", False) else ""
     return [highlight] * len(row)
 
@@ -311,7 +322,13 @@ def compare_files_tab() -> None:
         if not left_file or not right_file:
             st.error("Please upload both files for comparison.")
         else:
-            selected_template = next(tpl for tpl in templates if tpl.name == selected_template_name)
+            selected_template = next(
+                (tpl for tpl in templates if tpl.name == selected_template_name),
+                None,
+            )
+            if selected_template is None:
+                st.error("Selected template was not found.")
+                return
             try:
                 template_config = load_template(selected_template)
                 left_df = read_dataframe(left_file, detect_file_type(left_file.name))
@@ -330,7 +347,7 @@ def compare_files_tab() -> None:
         return
 
     st.markdown("### Comparison Results")
-    discrepancy_count = int(results_df["has_discrepancy"].sum())
+    discrepancy_count = results_df["has_discrepancy"].sum()
     st.metric("Rows with discrepancy", discrepancy_count)
 
     styled = results_df.style.apply(style_discrepancy_rows, axis=1)
