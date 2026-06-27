@@ -1,4 +1,4 @@
-# CompareVilla
+# CompareVillage
 
 Streamlit app for building reusable file-comparison templates and running configurable left/right file comparisons.
 

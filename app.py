@@ -38,7 +38,7 @@ def read_headers(uploaded_file: Any, file_type: str) -> list[str]:
     if file_type == "CSV":
         columns = pd.read_csv(uploaded_file, nrows=0).columns.tolist()
     else:
-        columns = pd.read_excel(uploaded_file, nrows=0, engine=None).columns.tolist()
+        columns = pd.read_excel(uploaded_file, nrows=0).columns.tolist()
     uploaded_file.seek(0)
     return [str(col) for col in columns]
 
@@ -48,7 +48,7 @@ def read_dataframe(uploaded_file: Any, file_type: str) -> pd.DataFrame:
     if file_type == "CSV":
         df = pd.read_csv(uploaded_file)
     else:
-        df = pd.read_excel(uploaded_file, engine=None)
+        df = pd.read_excel(uploaded_file)
     uploaded_file.seek(0)
     return df
 
@@ -64,7 +64,10 @@ def save_template(template_name: str, payload: dict[str, Any]) -> Path:
     if not safe_name:
         raise ValueError("Template name must contain alphanumeric characters.")
 
-    output_path = TEMPLATE_DIR / f"{safe_name}.json"
+    template_root = TEMPLATE_DIR.resolve()
+    output_path = (template_root / f"{safe_name}.json").resolve()
+    if output_path.parent != template_root:
+        raise ValueError("Invalid template name.")
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     return output_path
@@ -127,7 +130,7 @@ def compare_dataframes(
 
         if left_col not in merged.columns or right_col not in merged.columns:
             merged[f"{label} | mismatch"] = True
-            mismatch_any = True
+            mismatch_any |= True
             continue
 
         if mapping.get("type", "string") == "numeric":
